@@ -1044,4 +1044,5 @@ if __name__ == "__main__":
     print("  Mobile:  http://<your-ip>:5000")
     print("  Stop:    Ctrl+C")
     print("=" * 52)
-    app.run(debug=True, port=5000, host="0.0.0.0")
+    if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
