@@ -492,7 +492,7 @@ body{
   <div class="row3">
     <div class="field">
       <label>SL Pips</label>
-      <input type="number" id="eu_sl" value="20" inputmode="decimal" step="0.5" min="1">
+      <input type="number" id="eu_sl" value="10" inputmode="decimal" step="0.5" min="1">
     </div>
     <div class="field">
       <label>RR Ratio</label>
@@ -625,7 +625,7 @@ body{
   <div class="row3">
     <div class="field">
       <label>SL Pips</label>
-      <input type="number" id="uj_sl" value="30" inputmode="decimal" step="0.5" min="1">
+      <input type="number" id="uj_sl" value="10" inputmode="decimal" step="0.5" min="1">
     </div>
     <div class="field">
       <label>RR Ratio</label>
@@ -698,17 +698,17 @@ body{
   <div class="sec-label">Account & Risk</div>
   <div class="field"><label>Account Balance (USD)</label><input type="number" id="xau_bal" value="5000" inputmode="decimal" step="100" oninput="syncRisk('xau')"></div>
   <div class="row2">
-    <div class="field"><label>Risk %</label><input type="number" id="xau_rpct" value="1" inputmode="decimal" step="0.1" oninput="syncRisk('xau')"></div>
-    <div class="field"><label>Risk $ (USD)</label><input type="number" id="xau_rusd" value="50" inputmode="decimal" step="1" oninput="syncRiskMoney('xau')"></div>
+    <div class="field"><label>Risk %</label><input type="number" id="xau_rpct" value="0.5" inputmode="decimal" step="0.1" oninput="syncRisk('xau')"></div>
+    <div class="field"><label>Risk $ (USD)</label><input type="number" id="xau_rusd" value="25" inputmode="decimal" step="1" oninput="syncRiskMoney('xau')"></div>
   </div>
   <div class="risk-sync">
-    <div class="risk-sync-row"><span class="risk-key">Risk Amount</span><span class="risk-val pos" id="xau_sync_usd">$50.00</span></div>
-    <div class="risk-sync-row"><span class="risk-key">Risk Percent</span><span class="risk-val" id="xau_sync_pct">1.00% of balance</span></div>
+    <div class="risk-sync-row"><span class="risk-key">Risk Amount</span><span class="risk-val pos" id="xau_sync_usd">$25.00</span></div>
+    <div class="risk-sync-row"><span class="risk-key">Risk Percent</span><span class="risk-val" id="xau_sync_pct">0.50% of balance</span></div>
   </div>
 
   <div class="sec-label">Trade Setup</div>
   <div class="row3">
-    <div class="field"><label>SL Pips</label><input type="number" id="xau_sl" value="150" inputmode="decimal" step="1" min="1"><div class="hint">1 pip = $0.10</div></div>
+    <div class="field"><label>SL Pips</label><input type="number" id="xau_sl" value="830" inputmode="decimal" step="1" min="1"><div class="hint">1 pip = $1.0</div></div>
     <div class="field"><label>RR Ratio</label><input type="number" id="xau_rr" value="2" inputmode="decimal" step="0.5" min="0.5"></div>
     <div class="field"><label>Leverage</label><select id="xau_lev"><option value="500">1:500</option><option value="200">1:200</option><option value="100" selected>1:100</option><option value="50">1:50</option><option value="20">1:20</option></select></div>
   </div>
