@@ -15,7 +15,7 @@ app = Flask(__name__)
 INSTRUMENTS = {
     "EURUSD": {"pip_size": 0.0001, "pip_value": 10.0, "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long": -4.5, "swap_short": 1.2},
     "USDJPY": {"pip_size": 0.01,   "pip_value": 9.0,  "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long":  1.8, "swap_short": -3.2},
-    "XAUUSD": {"pip_size": 0.1,    "pip_value": 10.0, "lot_unit": 100,    "min_lot": 0.01, "lot_step": 0.01, "swap_long": -12.0,"swap_short": -8.0},
+    "XAUUSD": {"pip_size": 0.1,    "pip_value": 1.0, "lot_unit": 100,    "min_lot": 0.01, "lot_step": 0.01, "swap_long": -12.0,"swap_short": -8.0},
 }
 
 def calc_forex(data):
@@ -26,7 +26,7 @@ def calc_forex(data):
     sl_pips     = float(data["sl_pips"])
     rr_ratio    = float(data.get("rr", 2) or 2)
     leverage    = float(data.get("leverage", 100) or 100)
-    usdjpy_rate = float(data.get("usdjpy_rate", 150) or 150)
+    usdjpy_rate = float(data.get("usdjpy_rate", 160) or 160)
     swap_days   = int(data.get("swap_days", 0) or 0)
     trade_dir   = data.get("direction", "long")
 
@@ -1044,5 +1044,4 @@ if __name__ == "__main__":
     print("  Mobile:  http://<your-ip>:5000")
     print("  Stop:    Ctrl+C")
     print("=" * 52)
-    if __name__ == "__main__":
-       app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True, port=5000, host="0.0.0.0")
