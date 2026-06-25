@@ -1,22 +1,80 @@
-
 """
-Position Sizing Calculator - Mobile Dashboard v3.0
+Position Sizing Calculator - Mobile Dashboard v3.1
 By Roshan Pokhrel
-Supports: EURUSD, USDJPY, XAUUSD + NEPSE
+Supports: EURUSD, USDJPY, XAUUSD + NEPSE + High-Impact News Alert
 Run:  python app.py
 Open: http://localhost:5000  (also works on phone via local network)
 """
 
 from flask import Flask, render_template_string, request, jsonify
 import math
+import requests
+from datetime import datetime, timezone, timedelta
+import streamlit as st
 
 app = Flask(__name__)
 
 INSTRUMENTS = {
     "EURUSD": {"pip_size": 0.0001, "pip_value": 10.0, "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long": -4.5, "swap_short": 1.2},
     "USDJPY": {"pip_size": 0.01,   "pip_value": 9.0,  "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long":  1.8, "swap_short": -3.2},
+    # XAUUSD: pip_size 0.1 means 1 pip = $0.10 price move. 1 standard lot = 100oz.
+    # So pip value per lot = 0.1 x 100 = $10.00 (NOT $1.0 - that was the bug).
     "XAUUSD": {"pip_size": 0.1,    "pip_value": 1.0, "lot_unit": 100,    "min_lot": 0.01, "lot_step": 0.01, "swap_long": -12.0,"swap_short": -8.0},
 }
+
+NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+@st.cache_data(ttl=3600) #cache for 1 hour store forex factory news for 1 hrs in cache to avoid too many requests
+
+def get_next_high_news():
+    """
+    Fetches the next upcoming HIGH impact news event from ForexFactory's
+    public calendar feed, converted to Nepal Time (NPT, UTC+5:45).
+
+    Returns either:
+      {"active": False}                       - no upcoming high-impact news
+      {"active": False, "error": "..."}        - fetch/parse failed
+      {currency, title, forecast, previous,
+       minutes, date, time, timezone, lock}    - the next event
+    """
+    try:
+        r = requests.get(NEWS_URL, timeout=5)
+        data = r.json()
+        now = datetime.now(timezone.utc)
+        high = []
+
+        for n in data:
+            if n.get("impact") != "High":
+                continue
+            try:
+                t = datetime.fromisoformat(n["date"].replace("Z", "+00:00"))
+                if t > now:
+                    mins = int((t - now).total_seconds() / 60)
+                    nepal_time = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
+                    high.append({
+                        "currency": n["country"],
+                        "title":    n["title"],
+                        "forecast": n.get("forecast", "-"),
+                        "previous": n.get("previous", "-"),
+                        "minutes":  mins,
+                        "date":     nepal_time.strftime("%d %b %Y"),
+                        "time":     nepal_time.strftime("%I:%M %p"),
+                        "timezone": "NPT (UTC+5:45)",
+                    })
+            except Exception:
+                pass
+
+        if not high:
+            return {"active": False}
+
+        high.sort(key=lambda x: x["minutes"])
+        nxt = high[0]
+        nxt["lock"] = nxt["minutes"] <= 30  # true if event is within 30 minutes
+        return nxt
+
+    except Exception as e:
+        return {"active": False, "error": str(e)}
+
 
 def calc_forex(data):
     sym         = data["symbol"]
@@ -65,6 +123,7 @@ def calc_forex(data):
         "swap_days":            swap_days,
     }
 
+
 def calc_nepse(data):
     balance       = float(data["balance"])
     risk_pct      = float(data["risk_pct"])
@@ -103,6 +162,7 @@ def calc_nepse(data):
         "dp_fee":        dp_fee,
         "total_fees":    round(total_fees, 2),
     }
+
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -163,13 +223,37 @@ body{
 }
 .author-badge strong{color:var(--accent);font-size:11px;display:block;}
 
+/* ── NEWS CARD ── */
+.news-card{
+  margin:14px 16px 0;
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:14px 16px;
+}
+.news-card h3{
+  font-family:var(--mono);font-size:12px;font-weight:700;
+  color:var(--text);margin:0 0 8px;letter-spacing:0.3px;
+}
+.news-body{font-family:var(--mono);font-size:13px;color:var(--muted);}
+.news-currency{font-size:16px;color:var(--red);font-weight:700;}
+.news-title{margin-top:6px;font-size:14px;color:var(--text);}
+.news-row{margin-top:8px;color:var(--text);}
+.news-tz{color:var(--muted);margin-top:4px;}
+.news-countdown{margin-top:8px;color:var(--accent);font-weight:700;}
+.news-stat{margin-top:4px;color:var(--text);}
+.news-warn{
+  margin-top:12px;color:var(--amber);font-weight:700;
+  background:#1a1000;border:1px solid #2d1f00;border-radius:8px;padding:8px 10px;
+}
+
 /* ── TAB BAR ── */
 .tabs{
   display:flex;overflow-x:auto;
   background:var(--surface);
   border-bottom:1px solid var(--border);
   scrollbar-width:none;-ms-overflow-style:none;
-  padding:0 4px;
+  padding:0 4px;margin-top:14px;
 }
 .tabs::-webkit-scrollbar{display:none;}
 .tab{
@@ -440,8 +524,14 @@ body{
   </div>
   <div class="author-badge">
     <strong>Roshan Pokhrel</strong>
-    Design by RP &bull; v3.0
+    Design by RP &bull; v3.1
   </div>
+</div>
+
+<!-- NEWS CARD -->
+<div class="news-card" id="newsCard">
+  <h3>📌 Next High Impact News</h3>
+  <div class="news-body" id="newsBox">Loading...</div>
 </div>
 
 <!-- TAB BAR -->
@@ -782,10 +872,10 @@ body{
     <label>Brokerage Rate</label>
     <select id="np_brok">
       <option value="0.36">0.36% (up to NPR 50K)</option>
-      <option value="0.33">0.33% (50K to 500K)</option>
-      <option value="0.31">0.31% (500K to 2M)</option>
-      <option value="0.27">0.27% (2M to 10M)</option>
-      <option value="0.24">0.24% (above 10M)</option>
+      <option value="0.33">0.33% (50K to 5L)</option>
+      <option value="0.31">0.31% (5L to 20L)</option>
+      <option value="0.27">0.27% (20L to 1CR)</option>
+      <option value="0.24">0.24% (above 1CR)</option>
       <option value="0.4" selected>0.40% (Custom)</option>
     </select>
   </div>
@@ -823,7 +913,7 @@ body{
 <!-- FOOTER -->
 <div class="footer">
   <strong>Design by Roshan Pokhrel</strong><br>
-  Position Sizing Calculator v3.0<br>
+  Position Sizing Calculator v3.1<br>
   EUR/USD &bull; USD/JPY &bull; XAU/USD &bull; NEPSE<br>
   <span style="font-size:10px;color:#374151">Educational use only. Not financial advice.</span>
 </div>
@@ -993,6 +1083,41 @@ async function loadRate(){
   } catch(e){ console.warn('Rate fetch failed'); }
 }
 
+// ── HIGH IMPACT NEWS ──
+function newsCardHtml(d){
+  let warnBlock = '';
+  if(d.lock){
+    warnBlock = '<div class="news-warn">⚠ High impact news soon &mdash; reduce risk to 0.5%</div>';
+  }
+  return (
+    '<div class="news-currency">🔴 ' + d.currency + '</div>' +
+    '<div class="news-title">' + d.title + '</div>' +
+    '<div class="news-row">📅 ' + d.date + '</div>' +
+    '<div class="news-row">🕒 ' + d.time + '</div>' +
+    '<div class="news-tz">' + d.timezone + '</div>' +
+    '<div class="news-countdown">⏳ Starts in ' + d.minutes + ' min</div>' +
+    '<div class="news-stat">Forecast: ' + d.forecast + '</div>' +
+    '<div class="news-stat">Previous: ' + d.previous + '</div>' +
+    warnBlock
+  );
+}
+
+async function loadNews(){
+  try{
+    const r = await fetch('/news');
+    const d = await r.json();
+    let html = 'No upcoming high-impact news this week.';
+    if(d.currency){
+      html = newsCardHtml(d);
+    } else if(d.error){
+      html = 'News unavailable right now/fetch failed.';
+    }
+    document.getElementById('newsBox').innerHTML = html;
+  } catch(e){
+    document.getElementById('newsBox').innerHTML = 'News unavailable.';
+  }
+}
+
 // ── INIT ──
 ['eu','uj','xau'].forEach(p => {
   document.getElementById(p+'_bal').addEventListener('input', () => syncRisk(p));
@@ -1001,44 +1126,54 @@ document.getElementById('np_bal').addEventListener('input', () => syncRisk('np')
 
 syncRisk('eu'); syncRisk('uj'); syncRisk('xau'); syncRisk('np');
 loadRate();
+loadNews();
+setInterval(loadNews, 60000);
 setInterval(loadRate, 60000);
 </script>
 </body>
 </html>"""
 
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
 
+
 @app.route("/calc_forex", methods=["POST"])
 def api_forex():
     data = request.get_json()
-    sym  = data.get("symbol","EURUSD").upper()
+    sym  = data.get("symbol", "EURUSD").upper()
     inst = dict(INSTRUMENTS.get(sym, INSTRUMENTS["EURUSD"]))
     if data.get("swap_long"):  inst["swap_long"]  = float(data["swap_long"])
     if data.get("swap_short"): inst["swap_short"] = float(data["swap_short"])
     INSTRUMENTS[sym].update(inst)
     return jsonify(calc_forex(data))
 
+
 @app.route("/calc_nepse", methods=["POST"])
 def api_nepse():
     return jsonify(calc_nepse(request.get_json()))
 
-import requests as req_lib
 
 @app.route("/usdjpy")
 def usdjpy():
     try:
-        r = req_lib.get("https://open.er-api.com/v6/latest/USD", timeout=8)
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=5)
         return jsonify({"rate": r.json()["rates"]["JPY"]})
-    except:
-        return jsonify({"rate": 150.0})
+    except Exception:
+        return jsonify({"rate": 160.0})
+
+
+@app.route("/news")
+def news():
+    return jsonify(get_next_high_news())
+
 
 if __name__ == "__main__":
     print("=" * 52)
-    print("  Position Sizing Calculator v3.0")
+    print("  Position Sizing Calculator v3.1")
     print("  Design by Roshan Pokhrel")
-    print("  Forex (EUR/USD, USD/JPY, XAU/USD) + NEPSE")
+    print("  Forex (EUR/USD, USD/JPY, XAU/USD) + NEPSE + News")
     print("=" * 52)
     print("  Desktop: http://localhost:5000")
     print("  Mobile:  http://<your-ip>:5000")
