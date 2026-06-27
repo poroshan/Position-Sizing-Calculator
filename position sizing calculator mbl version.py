@@ -11,6 +11,7 @@ import math
 import requests
 from datetime import datetime, timezone, timedelta
 import streamlit as st
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -38,8 +39,17 @@ def get_next_high_news():
        minutes, date, time, timezone, lock}    - the next event
     """
     try:
-        r = requests.get(NEWS_URL, timeout=5)
+        r = requests.get(
+            NEWS_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        r.raise_for_status()
         data = r.json()
+
+        if not isinstance(data, list):
+            return {"active": False, "error": "News feed returned an unexpected format"}
+
         now = datetime.now(timezone.utc)
         high = []
 
@@ -47,7 +57,7 @@ def get_next_high_news():
             if n.get("impact") != "High":
                 continue
             try:
-                t = datetime.fromisoformat(n["date"].replace("Z", "+00:00"))
+                t = datetime.fromisoformat(str(n["date"]).replace("Z", "+00:00"))
                 if t > now:
                     mins = int((t - now).total_seconds() / 60)
                     nepal_time = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
@@ -62,7 +72,7 @@ def get_next_high_news():
                         "timezone": "NPT (UTC+5:45)",
                     })
             except Exception:
-                pass
+                continue
 
         if not high:
             return {"active": False}
@@ -73,7 +83,7 @@ def get_next_high_news():
         return nxt
 
     except Exception as e:
-        return {"active": False, "error": str(e)}
+        return {"active": False, "error": f"News fetch failed: {e}"}
 
 
 def calc_forex(data):
@@ -163,6 +173,53 @@ def calc_nepse(data):
         "total_fees":    round(total_fees, 2),
     }
 
+# ---------- FUNCTIONS ----------
+
+def get_market_session():
+
+    npt_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=45)))
+    now_minutes = npt_now.hour * 60 + npt_now.minute
+
+    if npt_now.weekday() >= 5:
+        return ["🔴 Market Closed (Weekend)"], ""
+
+    sessions = {
+        "Sydney": (21 * 60, 6 * 60),
+        "Tokyo": (0 * 60, 9 * 60),
+        "London": (8 * 60, 17 * 60),
+        "New York": (13 * 60, 22 * 60),
+    }
+
+    offset_minutes = 5 * 60 + 45
+    active = []
+
+    for name, (start, end) in sessions.items():
+        start_npt = (start + offset_minutes) % 1440
+        end_npt = (end + offset_minutes) % 1440
+
+        if start_npt < end_npt:
+            is_open = start_npt <= now_minutes < end_npt
+        else:
+            is_open = now_minutes >= start_npt or now_minutes < end_npt
+
+        if is_open:
+            active.append(name)
+
+    result = [f"🟢 {name} OPEN" for name in sessions if name in active]
+
+    if not result:
+        return ["🔴 Market Closed"], ""
+
+    overlap = ""
+
+    if "London" in active and "New York" in active:
+        overlap = "🔥 London + New York"
+
+    return result, overlap
+
+
+# ---------- UI STARTS ----------
+st.title("Position Sizing")
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -224,12 +281,44 @@ body{
 .author-badge strong{color:var(--accent);font-size:11px;display:block;}
 
 /* ── NEWS CARD ── */
-.news-card{
+.news-shell{
+  display:flex;
+  gap:12px;
+  align-items:stretch;
   margin:14px 16px 0;
+}
+.news-card{
+  flex:1.2;
   background:var(--card);
   border:1px solid var(--border);
   border-radius:14px;
   padding:14px 16px;
+}
+.session-panel{
+  flex:0.8;
+  min-width:220px;
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:14px 16px;
+}
+.session-title{
+  font-family:var(--mono);font-size:12px;font-weight:700;
+  color:var(--text);margin-bottom:10px;letter-spacing:0.3px;
+}
+.session-list{display:grid;gap:8px;}
+.session-item{
+  font-family:var(--mono);font-size:12px;
+  padding:8px 10px;border-radius:8px;
+  background:#0d1017;border:1px solid var(--border);
+  color:var(--muted);
+}
+.session-item.open{color:var(--green);border-color:rgba(16,185,129,.25);}
+.session-item.closed{color:var(--muted);}
+.session-overlap{
+  margin-top:10px;padding:8px 10px;border-radius:8px;
+  background:#1a1000;border:1px solid #2d1f00;
+  color:var(--amber);font-family:var(--mono);font-size:12px;font-weight:700;
 }
 .news-card h3{
   font-family:var(--mono);font-size:12px;font-weight:700;
@@ -529,9 +618,18 @@ body{
 </div>
 
 <!-- NEWS CARD -->
-<div class="news-card" id="newsCard">
-  <h3>📌 Next High Impact News</h3>
-  <div class="news-body" id="newsBox">Loading...</div>
+<div class="news-shell">
+  <div class="news-card" id="newsCard">
+    <h3>📌 Next High Impact News</h3>
+    <div class="news-body" id="newsBox">Loading...</div>
+  </div>
+  <div class="session-panel">
+    <div class="session-title">🕒 Forex Sessions</div>
+    <div class="session-list">{{ session_html|safe }}</div>
+    {% if overlap_text %}
+      <div class="session-overlap">⚡ High volatile · {{ overlap_text }}</div>
+    {% endif %}
+  </div>
 </div>
 
 <!-- TAB BAR -->
@@ -1102,6 +1200,7 @@ function newsCardHtml(d){
   );
 }
 
+
 async function loadNews(){
   try{
     const r = await fetch('/news');
@@ -1133,10 +1232,27 @@ setInterval(loadRate, 60000);
 </body>
 </html>"""
 
+#SESSION DASHBOARD
+st.markdown("### 🌍 Market Sessions")
+
+sessions, overlap = get_market_session()
+
+for s in sessions:
+    st.write(s)
+
+if overlap:
+    st.success(overlap)
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    sessions, overlap = get_market_session()
+    session_items = []
+    for item in sessions:
+        status_class = "open" if "OPEN" in item else "closed"
+        session_items.append(f'<div class="session-item {status_class}">{item}</div>')
+    session_html = "".join(session_items)
+    overlap_text = overlap if overlap else ""
+    return render_template_string(HTML, session_html=session_html, overlap_text=overlap_text)
 
 
 @app.route("/calc_forex", methods=["POST"])
