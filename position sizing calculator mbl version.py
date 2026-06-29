@@ -54,10 +54,14 @@ def get_next_high_news():
 
     try:
         r = requests.get(
-            NEWS_URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
+              NEWS_URL,
+              headers={
+                  "User-Agent": "Mozilla/5.0",
+                  "Accept": "application/json",
+                  "Referer": "https://www.forexfactory.com/"
+              },
+              timeout=20
+)
         r.raise_for_status()
         data = r.json()
 
@@ -750,9 +754,23 @@ function newsCardHtml(d){
 }
 async function loadNews(){
   try{
-    const r=await fetch('/news');const d=await r.json();
-    document.getElementById('newsBox').innerHTML=d.currency?newsCardHtml(d):(d.error?'News unavailable right now.':'No upcoming high-impact news this week.');
-  }catch(e){document.getElementById('newsBox').innerHTML='News unavailable.';}
+    const r=await fetch('/news');
+    const d=await r.json();
+
+    if(d.error){
+      document.getElementById('newsBox').innerHTML=
+        '<span style="color:red">'+d.error+'</span>';
+      return;
+    }
+
+    document.getElementById('newsBox').innerHTML=
+      d.currency ? newsCardHtml(d)
+      : 'No upcoming high-impact news.';
+  }
+  catch(e){
+    document.getElementById('newsBox').innerHTML=
+      'News fetch failed: '+e.message;
+  }
 }
 
 // ── SESSIONS ──
