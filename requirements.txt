@@ -1,2 +1,4 @@
+# requirements.txt
 flask
 requests
+gunicorn
