@@ -35,7 +35,7 @@ NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 _news_cache = {"value": None, "expires": 0.0}   # TTL: 1 hour
 _rate_cache = {"value": None, "expires": 0.0}   # TTL: 60 seconds
 
-NEWS_TTL  = 3600   # 1 hour in seconds
+NEWS_TTL  = 86400   # 24 hour 
 RATE_TTL  = 60     # 60 seconds
 
 
@@ -114,11 +114,36 @@ def get_next_high_news():
             nxt["lock"] = nxt["minutes"] <= 30
             result = nxt
 
+    except requests.exceptions.HTTPError as e:
+        # Handle 429 Too Many Requests
+        if e.response is not None and e.response.status_code == 429:
+            print("Rate limited — serving cached data")
+
+            if _news_cache["value"] is not None:
+                return _news_cache["value"]
+
+            result = {
+                "active": False,
+                "error": "Rate limit reached (429)"
+            }
+
+        else:
+            if _news_cache["value"] is not None:
+                return _news_cache["value"]
+
+            result = {
+                "active": False,
+                "error": f"HTTP error: {e}"
+            }
+
     except Exception as e:
-        # If we have a stale cached value, return it rather than an error
         if _news_cache["value"] is not None:
             return _news_cache["value"]
-        result = {"active": False, "error": f"News fetch failed: {e}"}
+
+        result = {
+            "active": False,
+            "error": f"News fetch failed: {e}"
+        }
 
     _news_cache["value"]   = result
     _news_cache["expires"] = now_ts + NEWS_TTL
@@ -789,7 +814,7 @@ async function loadSessions(){
 document.getElementById('np_bal').addEventListener('input',()=>syncRisk('np'));
 syncRisk('eu');syncRisk('uj');syncRisk('xau');syncRisk('np');
 loadRate();loadNews();loadSessions();
-setInterval(loadRate,60000);setInterval(loadNews,60000);setInterval(loadSessions,60000);
+setInterval(loadRate,60000);setInterval(loadNews,3600000);setInterval(loadSessions,60000);
 </script>
 </body>
 </html>"""
