@@ -201,8 +201,8 @@ def get_market_session():
     overlap = ""
     if "London" in active_names and "New York" in active_names:
         overlap = "London + New York"
-    elif "Sydney" in active_names and "Tokyo" in active_names:
-        overlap = "Sydney + Tokyo"
+    #elif "Sydney" in active_names and "Tokyo" in active_names:
+        #overlap = "Sydney + Tokyo"
 
     return sessions, overlap
 
