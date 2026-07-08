@@ -35,64 +35,232 @@ _NEWS_CACHE = {"data": None, "expires": 0.0}
 _NEWS_TTL = 1800  # 30 minutes cache
 
 
-def _fetch_forexfactory_news():
+# ─── NEWS: FETCH WITH MULTIPLE FALLBACKS ───
+_NEWS_CACHE = {"data": None, "expires": 0.0}
+_NEWS_TTL = 1800  # 30 minutes
+
+def _fetch_with_cloudflare_bypass(url, timeout=15):
     """
-    Fetches high-impact news. Tries direct, then proxy, then gives up.
+    Tries multiple techniques to bypass Cloudflare bot protection.
+    Returns response object or None.
     """
-    # 1. Try direct with full browser headers
-    try:
-        r = requests.get(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
-            },
-            timeout=12,
-            allow_redirects=True
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data
-    except Exception as e:
-        print(f"Direct fetch failed: {e}")
+    import urllib.request
+    import ssl
     
-    # 2. Try via CORS proxy
-    try:
-        proxy_url = "https://api.allorigins.win/raw?url=" + requests.utils.quote(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json", safe=''
-        )
-        r = requests.get(proxy_url, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data
-    except Exception as e:
-        print(f"Proxy fetch failed: {e}")
+    techniques = [
+        # Technique 1: requests with full browser headers + SSL adapter
+        lambda: _fetch_requests(url, timeout),
+        # Technique 2: urllib with custom SSL context
+        lambda: _fetch_urllib(url, timeout),
+        # Technique 3: requests with session + cookies
+        lambda: _fetch_session(url, timeout),
+    ]
     
-    # 3. Try alternative API
-    try:
-        r = requests.get(
-            "https://cdn.jsdelivr.net/gh/ramusus/forexfactory@master/forexfactory/calendar.json",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=12
-        )
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"Alternative API failed: {e}")
+    for i, technique in enumerate(techniques):
+        try:
+            result = technique()
+            if result and result.status_code == 200:
+                return result
+        except Exception as e:
+            print(f"Technique {i+1} failed: {e}")
+            continue
     
     return None
+
+
+def _fetch_requests(url, timeout):
+    """Standard requests with aggressive headers."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "TE": "trailers",
+    }
+    return requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+
+
+def _fetch_urllib(url, timeout):
+    """urllib with custom SSL context - sometimes bypasses blocks."""
+    import urllib.request
+    import ssl
+    
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+    )
+    
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as response:
+        class FakeResponse:
+            def __init__(self, data, status):
+                self.status_code = status
+                self._data = data
+            def json(self):
+                return json.loads(self._data.decode('utf-8'))
+        
+        return FakeResponse(response.read(), response.status)
+
+
+def _fetch_session(url, timeout):
+    """Session-based fetch with cookie persistence."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/html",
+    })
+    
+    # Visit main site first to get cookies
+    try:
+        session.get("https://www.forexfactory.com/", timeout=10)
+    except:
+        pass
+    
+    return session.get(url, timeout=timeout)
+
+
+def _fetch_forexfactory_news():
+    """
+    Fetches news with multiple fallback techniques.
+    """
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    
+    response = _fetch_with_cloudflare_bypass(url)
+    if response:
+        try:
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data
+        except:
+            pass
+    
+    return None
+
+
+def _parse_news(raw_data):
+    """Parse raw news data into standardized format."""
+    now_utc = datetime.now(timezone.utc)
+    ALLOWED = {"USD", "EUR", "JPY"}
+    high = []
+    
+    for n in raw_data:
+        impact = str(n.get("impact", "")).strip()
+        if impact not in {"High", "HIGH", "3"}:
+            continue
+        
+        country = str(n.get("country", "")).strip().upper()
+        if country not in ALLOWED:
+            continue
+        
+        try:
+            date_str = n.get("date", "")
+            if not date_str:
+                continue
+            
+            t = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            
+            if t > now_utc:
+                mins = int((t - now_utc).total_seconds() / 60)
+                if mins < 0:
+                    continue
+                
+                hrs, rem = divmod(mins, 60)
+                countdown = f"{hrs} hr {rem} min" if hrs > 0 else f"{rem} min"
+                npt = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
+                
+                high.append({
+                    "currency": country,
+                    "title": n.get("title", "Unknown Event"),
+                    "forecast": str(n.get("forecast", "-")),
+                    "previous": str(n.get("previous", "-")),
+                    "minutes": mins,
+                    "countdown": countdown,
+                    "date": npt.strftime("%d %b %Y"),
+                    "time": npt.strftime("%I:%M %p"),
+                    "timezone": "NPT (UTC+5:45)",
+                    "stale": False,
+                })
+        except Exception:
+            continue
+    
+    return high
+
+
+def get_next_high_news():
+    """
+    Reads news from cache file OR fetches directly.
+    """
+    global _NEWS_CACHE
+    now_ts = _time.monotonic()
+    
+    # Check in-memory cache
+    if _NEWS_CACHE["data"] is not None and now_ts < _NEWS_CACHE["expires"]:
+        return _NEWS_CACHE["data"]
+    
+    # Try file cache
+    raw_data = None
+    cache_age = 999
+    
+    try:
+        with open(CACHE_PATH, "r") as f:
+            file_cache = json.load(f)
+        raw_data = file_cache.get("data", [])
+        fetched_at = file_cache.get("timestamp", 0)
+        cache_age = (now_ts - fetched_at) / 3600 if fetched_at else 999
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    
+    # Fetch fresh if stale or missing
+    if cache_age > 2 or not raw_data:
+        fetched = _fetch_forexfactory_news()
+        if fetched:
+            raw_data = fetched
+            try:
+                with open(CACHE_PATH, "w") as f:
+                    json.dump({"data": fetched, "timestamp": now_ts}, f)
+            except Exception:
+                pass
+    
+    # Parse
+    if not raw_data:
+        return {
+            "active": False,
+            "error": "Unable to fetch news. ForexFactory may be blocking cloud IPs.",
+            "manual_link": "https://www.forexfactory.com/calendar",
+            "stale": True,
+        }
+    
+    high = _parse_news(raw_data)
+    
+    if not high:
+        result = {
+            "active": False,
+            "stale": cache_age > 48,
+            "message": "No upcoming high-impact USD/EUR/JPY news."
+        }
+    else:
+        high.sort(key=lambda x: x["minutes"])
+        result = high[0]
+        result["lock"] = result["minutes"] <= 30
+    
+    _NEWS_CACHE["data"] = result
+    _NEWS_CACHE["expires"] = now_ts + _NEWS_TTL
+    
+    return result
 
 def _parse_news(raw_data):
     """Parse raw news data into standardized format."""
