@@ -34,51 +34,65 @@ RATE_TTL = 60  # 1 minute for live rates
 _NEWS_CACHE = {"data": None, "expires": 0.0}
 _NEWS_TTL = 1800  # 30 minutes cache
 
+
 def _fetch_forexfactory_news():
     """
-    Fetches high-impact news. Tries multiple sources to avoid rate limits.
+    Fetches high-impact news. Tries direct, then proxy, then gives up.
     """
-    # Try multiple news sources in order
-    sources = [
-        {
-            "url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            "headers": {
+    # 1. Try direct with full browser headers
+    try:
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/html",
+                "Accept": "application/json, text/html,application/xhtml+xml",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.forexfactory.com/",
-            }
-        },
-        {
-            "url": "https://cdn.jsdelivr.net/gh/ramusus/forexfactory@master/forexfactory/calendar.json",
-            "headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-            }
-        },
-    ]
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            },
+            timeout=12,
+            allow_redirects=True
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data
+    except Exception as e:
+        print(f"Direct fetch failed: {e}")
     
-    for source in sources:
-        for attempt in range(2):
-            try:
-                r = requests.get(
-                    source["url"], 
-                    headers=source["headers"], 
-                    timeout=12,
-                    allow_redirects=True
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        return data
-                elif r.status_code == 429:
-                    _time.sleep(5)
-            except Exception as e:
-                print(f"Source failed: {e}")
-                _time.sleep(2)
+    # 2. Try via CORS proxy
+    try:
+        proxy_url = "https://api.allorigins.win/raw?url=" + requests.utils.quote(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json", safe=''
+        )
+        r = requests.get(proxy_url, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data
+    except Exception as e:
+        print(f"Proxy fetch failed: {e}")
+    
+    # 3. Try alternative API
+    try:
+        r = requests.get(
+            "https://cdn.jsdelivr.net/gh/ramusus/forexfactory@master/forexfactory/calendar.json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"Alternative API failed: {e}")
     
     return None
-
 
 def _parse_news(raw_data):
     """Parse raw news data into standardized format."""
@@ -87,11 +101,13 @@ def _parse_news(raw_data):
     high = []
     
     for n in raw_data:
-        impact = str(n.get("impact", "")).upper()
-        if impact not in {"HIGH", "3"}:
+        # Handle different field names
+        impact = str(n.get("impact", "")).strip()
+        # ForexFactory uses "High", "Medium", "Low"
+        if impact not in {"High", "HIGH", "3"}:
             continue
         
-        country = str(n.get("country", n.get("Currency", ""))).upper()
+        country = str(n.get("country", n.get("Currency", ""))).strip().upper()
         if country not in ALLOWED:
             continue
         
@@ -100,9 +116,15 @@ def _parse_news(raw_data):
             if not date_str:
                 continue
             
+            # Parse ISO format with timezone
             t = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            
+            # Only show future events
             if t > now_utc:
                 mins = int((t - now_utc).total_seconds() / 60)
+                if mins < 0:
+                    continue  # Skip past events
+                
                 hrs, rem = divmod(mins, 60)
                 countdown = f"{hrs} hr {rem} min" if hrs > 0 else f"{rem} min"
                 npt = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
@@ -119,11 +141,11 @@ def _parse_news(raw_data):
                     "timezone": "NPT (UTC+5:45)",
                     "stale": False,
                 })
-        except Exception:
+        except Exception as e:
+            print(f"Parse error for event: {e}")
             continue
     
     return high
-
 
 def get_next_high_news():
     """
