@@ -1,5 +1,5 @@
 """
-Position Sizing Calculator v3.3 — Render-Ready
+Position_Sizing_Calculator_v3.3 — Render-Ready
 Reads news from cached file (populated by cron job).
 """
 
