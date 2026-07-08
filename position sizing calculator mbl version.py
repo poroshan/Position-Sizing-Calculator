@@ -6,6 +6,7 @@ Reads news from cached file (populated by cron job).
 import json
 import math
 import os
+import sys
 import time as _time
 from datetime import datetime, timezone, timedelta
 
@@ -114,7 +115,27 @@ def _fetch_urllib(url, timeout):
                 return json.loads(self._data.decode('utf-8'))
         
         return FakeResponse(response.read(), response.status)
-
+def _fetch_forexfactory_news():
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    
+    print(f"=== FETCHING NEWS FROM {url} ===")
+    print(f"Python version: {sys.version}")
+    print(f"Requests version: {requests.__version__}")
+    
+    response = _fetch_with_cloudflare_bypass(url)
+    
+    if response:
+        print(f"SUCCESS! Status: {response.status_code}")
+        try:
+            data = response.json()
+            print(f"Events: {len(data)}")
+            return data
+        except Exception as e:
+            print(f"JSON parse error: {e}")
+    else:
+        print("ALL TECHNIQUES FAILED")
+    
+    return None
 
 def _fetch_session(url, timeout):
     """Session-based fetch with cookie persistence."""
