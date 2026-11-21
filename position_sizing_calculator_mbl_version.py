@@ -30,375 +30,112 @@ INSTRUMENTS = {
 _rate_cache = {"value": None, "expires": 0.0}
 RATE_TTL = 60  # 1 minute for live rates
 
-# ─── NEWS: READ FROM FILE CACHE ───
-# ─── NEWS: FETCH DIRECTLY WITH FALLBACK ───
-_NEWS_CACHE = {"data": None, "expires": 0.0}
-_NEWS_TTL = 1800  # 30 minutes cache
+# ═══════════════════════════════════════════════════════════════
+# REPLACE everything in your app.py from the line
+#   "# ─── NEWS: READ FROM FILE CACHE ───"
+# down to (and including) the SECOND get_next_high_news() with this block.
+# That removes all the duplicated functions, the Cloudflare "bypass" code,
+# and the broken file cache. Keep "# ─── MARKET SESSIONS ───" below it.
+# ═══════════════════════════════════════════════════════════════
+
+# ─── NEWS ───
+# Primary source: a news.json that GitHub Actions refreshes (see fetch_news.yml).
+# Set NEWS_URL in Render -> Environment, e.g.
+#   https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/news.json
+NEWS_URL = os.environ.get("NEWS_URL", "")
+DIRECT_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"  # last-resort fallback
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+RAW_TTL = 600        # re-download at most every 10 min
+RETRY_BACKOFF = 120  # after a failure, wait 2 min before trying again
+_NEWS = {"raw": None, "fetched": 0.0, "next_try": 0.0}
 
 
-# ─── NEWS: FETCH WITH MULTIPLE FALLBACKS ───
-_NEWS_CACHE = {"data": None, "expires": 0.0}
-_NEWS_TTL = 1800  # 30 minutes
-
-def _fetch_with_cloudflare_bypass(url, timeout=15):
-    """
-    Tries multiple techniques to bypass Cloudflare bot protection.
-    Returns response object or None.
-    """
-    import urllib.request
-    import ssl
-    
-    techniques = [
-        # Technique 1: requests with full browser headers + SSL adapter
-        lambda: _fetch_requests(url, timeout),
-        # Technique 2: urllib with custom SSL context
-        lambda: _fetch_urllib(url, timeout),
-        # Technique 3: requests with session + cookies
-        lambda: _fetch_session(url, timeout),
-    ]
-    
-    for i, technique in enumerate(techniques):
-        try:
-            result = technique()
-            if result and result.status_code == 200:
-                return result
-        except Exception as e:
-            print(f"Technique {i+1} failed: {e}")
-            continue
-    
-    return None
+def _download(url):
+    r = requests.get(url, timeout=10, headers={"User-Agent": _UA, "Accept": "application/json"})
+    print(f"[news] {url} -> HTTP {r.status_code}")      # check this in Render logs
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, dict):                           # tolerate {"data": [...]}
+        data = data.get("data", [])
+    if not isinstance(data, list) or not data:
+        raise ValueError("empty or invalid news payload")
+    return data
 
 
-def _fetch_requests(url, timeout):
-    """Standard requests with aggressive headers."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-        "TE": "trailers",
-    }
-    return requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-
-
-def _fetch_urllib(url, timeout):
-    """urllib with custom SSL context - sometimes bypasses blocks."""
-    import urllib.request
-    import ssl
-    
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-        }
-    )
-    
-    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as response:
-        class FakeResponse:
-            def __init__(self, data, status):
-                self.status_code = status
-                self._data = data
-            def json(self):
-                return json.loads(self._data.decode('utf-8'))
-        
-        return FakeResponse(response.read(), response.status)
-def _fetch_forexfactory_news():
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    
-    print(f"=== FETCHING NEWS FROM {url} ===")
-    print(f"Python version: {sys.version}")
-    print(f"Requests version: {requests.__version__}")
-    
-    response = _fetch_with_cloudflare_bypass(url)
-    
-    if response:
-        print(f"SUCCESS! Status: {response.status_code}")
-        try:
-            data = response.json()
-            print(f"Events: {len(data)}")
-            return data
-        except Exception as e:
-            print(f"JSON parse error: {e}")
-    else:
-        print("ALL TECHNIQUES FAILED")
-    
-    return None
-
-def _fetch_session(url, timeout):
-    """Session-based fetch with cookie persistence."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/html",
-    })
-    
-    # Visit main site first to get cookies
-    try:
-        session.get("https://www.forexfactory.com/", timeout=10)
-    except:
-        pass
-    
-    return session.get(url, timeout=timeout)
-
-
-def _fetch_forexfactory_news():
-    """
-    Fetches news with multiple fallback techniques.
-    """
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    
-    response = _fetch_with_cloudflare_bypass(url)
-    if response:
-        try:
-            data = response.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data
-        except:
-            pass
-    
-    return None
+def _get_raw_events():
+    """Returns (events_or_None, age_in_hours). Keeps last good data if a refresh fails."""
+    now = _time.time()
+    fresh = _NEWS["raw"] is not None and (now - _NEWS["fetched"]) < RAW_TTL
+    if not fresh and now >= _NEWS["next_try"]:
+        for url in [u for u in (NEWS_URL, DIRECT_URL) if u]:
+            try:
+                _NEWS["raw"] = _download(url)
+                _NEWS["fetched"] = now
+                _NEWS["next_try"] = 0.0
+                break
+            except Exception as e:
+                print(f"[news] failed {url}: {e}")
+        else:
+            _NEWS["next_try"] = now + RETRY_BACKOFF      # don't hammer the source
+    age_h = (now - _NEWS["fetched"]) / 3600 if _NEWS["fetched"] else 999
+    return _NEWS["raw"], age_h
 
 
 def _parse_news(raw_data):
-    """Parse raw news data into standardized format."""
     now_utc = datetime.now(timezone.utc)
-    ALLOWED = {"USD", "EUR", "JPY"}
+    allowed = {"USD", "EUR", "JPY"}
+    npt_tz = timezone(timedelta(hours=5, minutes=45))
     high = []
-    
     for n in raw_data:
-        impact = str(n.get("impact", "")).strip()
-        if impact not in {"High", "HIGH", "3"}:
+        if str(n.get("impact", "")).strip().lower() not in {"high", "3"}:
             continue
-        
         country = str(n.get("country", "")).strip().upper()
-        if country not in ALLOWED:
+        if country not in allowed:
             continue
-        
         try:
-            date_str = n.get("date", "")
-            if not date_str:
+            t = datetime.fromisoformat(str(n.get("date", "")).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            if t <= now_utc:
                 continue
-            
-            t = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            
-            if t > now_utc:
-                mins = int((t - now_utc).total_seconds() / 60)
-                if mins < 0:
-                    continue
-                
-                hrs, rem = divmod(mins, 60)
-                countdown = f"{hrs} hr {rem} min" if hrs > 0 else f"{rem} min"
-                npt = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
-                
-                high.append({
-                    "currency": country,
-                    "title": n.get("title", "Unknown Event"),
-                    "forecast": str(n.get("forecast", "-")),
-                    "previous": str(n.get("previous", "-")),
-                    "minutes": mins,
-                    "countdown": countdown,
-                    "date": npt.strftime("%d %b %Y"),
-                    "time": npt.strftime("%I:%M %p"),
-                    "timezone": "NPT (UTC+5:45)",
-                    "stale": False,
-                })
-        except Exception:
-            continue
-    
-    return high
-
-
-def get_next_high_news():
-    """
-    Reads news from cache file OR fetches directly.
-    """
-    global _NEWS_CACHE
-    now_ts = _time.monotonic()
-    
-    # Check in-memory cache
-    if _NEWS_CACHE["data"] is not None and now_ts < _NEWS_CACHE["expires"]:
-        return _NEWS_CACHE["data"]
-    
-    # Try file cache
-    raw_data = None
-    cache_age = 999
-    
-    try:
-        with open(CACHE_PATH, "r") as f:
-            file_cache = json.load(f)
-        raw_data = file_cache.get("data", [])
-        fetched_at = file_cache.get("timestamp", 0)
-        cache_age = (now_ts - fetched_at) / 3600 if fetched_at else 999
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    
-    # Fetch fresh if stale or missing
-    if cache_age > 2 or not raw_data:
-        fetched = _fetch_forexfactory_news()
-        if fetched:
-            raw_data = fetched
-            try:
-                with open(CACHE_PATH, "w") as f:
-                    json.dump({"data": fetched, "timestamp": now_ts}, f)
-            except Exception:
-                pass
-    
-    # Parse
-    if not raw_data:
-        return {
-            "active": False,
-            "error": "Unable to fetch news. ForexFactory may be blocking cloud IPs.",
-            "manual_link": "https://www.forexfactory.com/calendar",
-            "stale": True,
-        }
-    
-    high = _parse_news(raw_data)
-    
-    if not high:
-        result = {
-            "active": False,
-            "stale": cache_age > 48,
-            "message": "No upcoming high-impact USD/EUR/JPY news."
-        }
-    else:
-        high.sort(key=lambda x: x["minutes"])
-        result = high[0]
-        result["lock"] = result["minutes"] <= 30
-    
-    _NEWS_CACHE["data"] = result
-    _NEWS_CACHE["expires"] = now_ts + _NEWS_TTL
-    
-    return result
-
-def _parse_news(raw_data):
-    """Parse raw news data into standardized format."""
-    now_utc = datetime.now(timezone.utc)
-    ALLOWED = {"USD", "EUR", "JPY"}
-    high = []
-    
-    for n in raw_data:
-        # Handle different field names
-        impact = str(n.get("impact", "")).strip()
-        # ForexFactory uses "High", "Medium", "Low"
-        if impact not in {"High", "HIGH", "3"}:
-            continue
-        
-        country = str(n.get("country", n.get("Currency", ""))).strip().upper()
-        if country not in ALLOWED:
-            continue
-        
-        try:
-            date_str = n.get("date", n.get("DateTime", ""))
-            if not date_str:
-                continue
-            
-            # Parse ISO format with timezone
-            t = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            
-            # Only show future events
-            if t > now_utc:
-                mins = int((t - now_utc).total_seconds() / 60)
-                if mins < 0:
-                    continue  # Skip past events
-                
-                hrs, rem = divmod(mins, 60)
-                countdown = f"{hrs} hr {rem} min" if hrs > 0 else f"{rem} min"
-                npt = t.astimezone(timezone(timedelta(hours=5, minutes=45)))
-                
-                high.append({
-                    "currency": country,
-                    "title": n.get("title", n.get("Title", "Unknown Event")),
-                    "forecast": str(n.get("forecast", n.get("Forecast", "-"))),
-                    "previous": str(n.get("previous", n.get("Previous", "-"))),
-                    "minutes": mins,
-                    "countdown": countdown,
-                    "date": npt.strftime("%d %b %Y"),
-                    "time": npt.strftime("%I:%M %p"),
-                    "timezone": "NPT (UTC+5:45)",
-                    "stale": False,
-                })
+            mins = int((t - now_utc).total_seconds() / 60)
+            hrs, rem = divmod(mins, 60)
+            npt = t.astimezone(npt_tz)
+            high.append({
+                "currency": country,
+                "title": n.get("title", "Unknown Event"),
+                "forecast": str(n.get("forecast") or "-"),
+                "previous": str(n.get("previous") or "-"),
+                "minutes": mins,
+                "countdown": f"{hrs} hr {rem} min" if hrs > 0 else f"{rem} min",
+                "date": npt.strftime("%d %b %Y"),
+                "time": npt.strftime("%I:%M %p"),
+                "timezone": "NPT (UTC+5:45)",
+                "stale": False,
+            })
         except Exception as e:
-            print(f"Parse error for event: {e}")
-            continue
-    
+            print(f"[news] parse error: {e}")
     return high
 
+
 def get_next_high_news():
-    """
-    Reads news from cache file OR fetches directly from ForexFactory.
-    Uses in-memory cache with 30-min TTL to avoid repeated requests.
-    """
-    global _NEWS_CACHE
-    now_ts = _time.monotonic()
-    
-    # 1. Check in-memory cache first
-    if _NEWS_CACHE["data"] is not None and now_ts < _NEWS_CACHE["expires"]:
-        return _NEWS_CACHE["data"]
-    
-    # 2. Try to read from file cache
-    raw_data = None
-    cache_age = 999
-    
-    try:
-        with open(CACHE_PATH, "r") as f:
-            file_cache = json.load(f)
-        raw_data = file_cache.get("data", [])
-        fetched_at = file_cache.get("timestamp", 0)
-        cache_age = (now_ts - fetched_at) / 3600 if fetched_at else 999
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    
-    # 3. If file cache is stale (>2 hours) or missing, fetch fresh
-    if cache_age > 2 or not raw_data:
-        fetched = _fetch_forexfactory_news()
-        if fetched:
-            raw_data = fetched
-            # Save to file cache for persistence
-            try:
-                with open(CACHE_PATH, "w") as f:
-                    json.dump({"data": fetched, "timestamp": now_ts}, f)
-            except Exception:
-                pass
-    
-    # 4. Parse and format
-    if not raw_data:
+    raw, age_h = _get_raw_events()
+    if not raw:
         return {
             "active": False,
-            "error": "Unable to fetch news. Check connection or visit ForexFactory.",
+            "error": "News source unreachable right now. Retrying automatically.",
             "manual_link": "https://www.forexfactory.com/calendar",
             "stale": True,
         }
-    
-    high = _parse_news(raw_data)
-    
+    high = _parse_news(raw)
     if not high:
-        result = {
-            "active": False,
-            "stale": cache_age > 48,
-            "message": "No upcoming high-impact news for USD/EUR/JPY."
-        }
-    else:
-        high.sort(key=lambda x: x["minutes"])
-        result = high[0]
-        result["lock"] = result["minutes"] <= 30
-    
-    # Save to in-memory cache
-    _NEWS_CACHE["data"] = result
-    _NEWS_CACHE["expires"] = now_ts + _NEWS_TTL
-    
+        return {"active": False, "stale": age_h > 48,
+                "message": "No upcoming high-impact USD/EUR/JPY news this week."}
+    high.sort(key=lambda x: x["minutes"])
+    result = high[0]
+    result["lock"] = result["minutes"] <= 30
+    result["stale"] = age_h > 48
     return result
 
 
