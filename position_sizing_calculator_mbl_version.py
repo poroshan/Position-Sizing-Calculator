@@ -1,12 +1,10 @@
 """
-Position_Sizing_Calculator_v3.3 — Render-Ready
-Reads news from cached file (populated by cron job).
+Position_Sizing_Calculator_v3.4 — Render-Ready
+Fix: XAUUSD pip value (1 pip = $0.10 move => $10 per pip per 100-oz lot).
 """
 
-import json
 import math
 import os
-import sys
 import time as _time
 from datetime import datetime, timezone, timedelta
 
@@ -15,48 +13,34 @@ from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
-# ─── PATHS ───
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_PATH = os.path.join(BASE_DIR, "news_cache.json")
-
 # ─── INSTRUMENTS ───
+# XAUUSD: 1 lot = 100 oz. Here 1 "pip" = $1 price move => $100 per pip per lot.
 INSTRUMENTS = {
     "EURUSD": {"pip_size": 0.0001, "pip_value": 10.0, "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long": -4.5, "swap_short": 1.2},
     "USDJPY": {"pip_size": 0.01, "pip_value": 9.0, "lot_unit": 100000, "min_lot": 0.01, "lot_step": 0.01, "swap_long": 1.8, "swap_short": -3.2},
-    "XAUUSD": {"pip_size": 0.1, "pip_value": 1.0, "lot_unit": 100, "min_lot": 0.01, "lot_step": 0.01, "swap_long": -12.0, "swap_short": -8.0},
+    "XAUUSD": {"pip_size": 1.0, "pip_value": 100.0, "lot_unit": 100, "min_lot": 0.01, "lot_step": 0.01, "swap_long": -12.0, "swap_short": -8.0},
 }
 
-# ─── CACHES ───
+# ─── RATE CACHE ───
 _rate_cache = {"value": None, "expires": 0.0}
-RATE_TTL = 60  # 1 minute for live rates
-
-# ═══════════════════════════════════════════════════════════════
-# REPLACE everything in your app.py from the line
-#   "# ─── NEWS: READ FROM FILE CACHE ───"
-# down to (and including) the SECOND get_next_high_news() with this block.
-# That removes all the duplicated functions, the Cloudflare "bypass" code,
-# and the broken file cache. Keep "# ─── MARKET SESSIONS ───" below it.
-# ═══════════════════════════════════════════════════════════════
+RATE_TTL = 60
 
 # ─── NEWS ───
-# Primary source: a news.json that GitHub Actions refreshes (see fetch_news.yml).
-# Set NEWS_URL in Render -> Environment, e.g.
-#   https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/news.json
 NEWS_URL = os.environ.get("NEWS_URL", "")
-DIRECT_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"  # last-resort fallback
+DIRECT_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-RAW_TTL = 600        # re-download at most every 10 min
-RETRY_BACKOFF = 120  # after a failure, wait 2 min before trying again
+RAW_TTL = 600
+RETRY_BACKOFF = 120
 _NEWS = {"raw": None, "fetched": 0.0, "next_try": 0.0}
 
 
 def _download(url):
     r = requests.get(url, timeout=10, headers={"User-Agent": _UA, "Accept": "application/json"})
-    print(f"[news] {url} -> HTTP {r.status_code}")      # check this in Render logs
+    print(f"[news] {url} -> HTTP {r.status_code}")
     r.raise_for_status()
     data = r.json()
-    if isinstance(data, dict):                           # tolerate {"data": [...]}
+    if isinstance(data, dict):
         data = data.get("data", [])
     if not isinstance(data, list) or not data:
         raise ValueError("empty or invalid news payload")
@@ -64,7 +48,6 @@ def _download(url):
 
 
 def _get_raw_events():
-    """Returns (events_or_None, age_in_hours). Keeps last good data if a refresh fails."""
     now = _time.time()
     fresh = _NEWS["raw"] is not None and (now - _NEWS["fetched"]) < RAW_TTL
     if not fresh and now >= _NEWS["next_try"]:
@@ -77,7 +60,7 @@ def _get_raw_events():
             except Exception as e:
                 print(f"[news] failed {url}: {e}")
         else:
-            _NEWS["next_try"] = now + RETRY_BACKOFF      # don't hammer the source
+            _NEWS["next_try"] = now + RETRY_BACKOFF
     age_h = (now - _NEWS["fetched"]) / 3600 if _NEWS["fetched"] else 999
     return _NEWS["raw"], age_h
 
@@ -168,72 +151,91 @@ def get_market_session():
         if is_open:
             active.append(name)
 
-    overlap = ""
-    if "London" in active and "New York" in active:
-        overlap = "London + New York"
-    #elif "Sydney" in active and "Tokyo" in active:
-        #overlap = "Sydney + Tokyo"
-
+    overlap = "London + New York" if ("London" in active and "New York" in active) else ""
     return sessions, overlap
 
 
 # ─── CALCULATORS ───
-def calc_forex(data):
+def _f(data, key, default):
+    """Safe float: empty/None/invalid -> default (but keeps a real 0)."""
+    v = data.get(key)
+    if v in (None, ""):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def calc_forex(data, inst):
     sym = data["symbol"]
-    inst = INSTRUMENTS[sym]
-    balance = float(data["balance"])
-    risk_pct = float(data["risk_pct"])
-    sl_pips = float(data["sl_pips"])
-    rr_ratio = float(data.get("rr", 2) or 2)
-    leverage = float(data.get("leverage", 100) or 100)
-    usdjpy_rate = float(data.get("usdjpy_rate", 160) or 160)
-    swap_days = int(data.get("swap_days", 0) or 0)
+    balance = _f(data, "balance", 0)
+    risk_pct = _f(data, "risk_pct", 0)
+    sl_pips = _f(data, "sl_pips", 0)
+    rr_ratio = _f(data, "rr", 2) or 2
+    leverage = _f(data, "leverage", 100) or 100
+    usdjpy_rate = _f(data, "usdjpy_rate", 160) or 160
+    swap_days = int(_f(data, "swap_days", 0))
     trade_dir = data.get("direction", "long")
 
-    pip_val = inst["pip_value"]
-    if sym == "USDJPY":
-        pip_val = (inst["pip_size"] * inst["lot_unit"]) / usdjpy_rate
+    if balance <= 0:
+        return {"error": "Balance must be > 0"}
     if sl_pips <= 0:
         return {"error": "SL pips must be > 0"}
 
+    # Pip value per 1 standard lot, in USD
+    pip_val = inst["pip_value"]
+    if sym == "USDJPY":
+        pip_val = (inst["pip_size"] * inst["lot_unit"]) / usdjpy_rate   # 1000 JPY / rate
+
     risk_amount = balance * risk_pct / 100.0
-    lot_size = risk_amount / (sl_pips * pip_val)
-    lot_size = max(inst["min_lot"], lot_size)
-    lot_size = math.floor(lot_size / inst["lot_step"]) * inst["lot_step"]
-    lot_size = round(lot_size, 2)
+    raw_lot = risk_amount / (sl_pips * pip_val)
+
+    step = inst["lot_step"]
+    lot_size = math.floor(raw_lot / step + 1e-9) * step      # round DOWN to step (epsilon avoids float error)
+    lot_size = max(inst["min_lot"], round(lot_size, 2))
+    min_lot_forced = raw_lot < inst["min_lot"]
+
     tp_pips = sl_pips * rr_ratio
     reward = lot_size * tp_pips * pip_val
-    margin = (lot_size * inst["lot_unit"]) / leverage
-    swap_rate = inst["swap_long"] if trade_dir == "long" else inst["swap_short"]
-    swap_night_usd = swap_rate * pip_val * lot_size
     actual_risk = lot_size * sl_pips * pip_val
 
-    return {
+    # Gold margin needs the price, which we intentionally don't ask for -> not shown
+    margin = None if sym == "XAUUSD" else (lot_size * inst["lot_unit"]) / leverage
+
+    swap_rate = inst["swap_long"] if trade_dir == "long" else inst["swap_short"]
+    swap_night_usd = swap_rate * pip_val * lot_size
+
+    out = {
         "lot_size": round(lot_size, 2),
-        "sl_pips": round(sl_pips, 1),
-        "tp_pips": round(tp_pips, 1),
+        "sl_pips": round(sl_pips, 3),
+        "tp_pips": round(tp_pips, 3),
         "risk_amount": round(actual_risk, 2),
         "risk_pct": round((actual_risk / balance) * 100, 3),
         "reward_amount": round(reward, 2),
         "rr_ratio": round(rr_ratio, 2),
-        "margin_required": round(margin, 2),
+        "margin_required": round(margin, 2) if margin is not None else None,
         "pip_value": round(pip_val, 4),
         "swap_per_night_pips": round(swap_rate, 2),
         "swap_per_night_usd": round(swap_night_usd, 2),
         "swap_total_pips": round(swap_rate * swap_days, 2),
         "swap_total_usd": round(swap_night_usd * swap_days, 2),
         "swap_days": swap_days,
+        "min_lot_forced": min_lot_forced,
     }
+    return out
 
 
 def calc_nepse(data):
-    balance = float(data["balance"])
-    risk_pct = float(data["risk_pct"])
-    sl_pts = float(data["sl_pips"])
-    rr_ratio = float(data.get("rr", 2) or 2)
-    brokerage_pct = float(data.get("brokerage", 0.4) or 0.4)
-    entry_price = float(data.get("entry_price", 800) or 800)
+    balance = _f(data, "balance", 0)
+    risk_pct = _f(data, "risk_pct", 0)
+    sl_pts = _f(data, "sl_pips", 0)
+    rr_ratio = _f(data, "rr", 2) or 2
+    brokerage_pct = _f(data, "brokerage", 0.4) or 0.4
+    entry_price = _f(data, "entry_price", 800) or 800
 
+    if balance <= 0:
+        return {"error": "Capital must be > 0"}
     if sl_pts <= 0:
         return {"error": "SL must be > 0"}
 
@@ -266,7 +268,7 @@ def calc_nepse(data):
     }
 
 
-# ─── HTML TEMPLATE (same as your v3.2, with stale warning added) ───
+# ─── HTML TEMPLATE ───
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -369,6 +371,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 
 .err-box{background:#1f0a0a;border:1.5px solid var(--red);border-radius:10px;padding:12px 14px;color:var(--red);font-family:var(--mono);font-size:12px;margin-bottom:12px;display:none;}
 .err-box.show{display:block;}
+.warn-box{background:#1a1000;border:1.5px solid #2d1f00;border-radius:10px;padding:10px 14px;color:var(--amber);font-family:var(--mono);font-size:12px;margin:0;display:none;}
+.warn-box.show{display:block;}
 
 .result-card{background:#0d1017;border:1.5px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:20px;display:none;}
 .result-card.show{display:block;}
@@ -415,7 +419,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
   </div>
   <div class="author-badge">
     <strong>Roshan Pokhrel</strong>
-    Design by RP &bull; v3.3
+    Design by RP &bull; v3.4
   </div>
 </div>
 
@@ -464,6 +468,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
   <div class="err-box" id="eu_err"></div>
   <div class="result-card" id="eu_res">
     <div class="lot-hero"><div class="lot-number" id="eu_lots">0.00</div><div class="lot-unit">Standard Lots</div></div>
+    <div class="warn-box" id="eu_warn"></div>
     <div class="res-grid">
       <div class="res-cell"><div class="res-label">Lot Size</div><div class="res-val b" id="eu_rlot">-</div></div>
       <div class="res-cell"><div class="res-label">Pip Value/Lot</div><div class="res-val w" id="eu_rpv">-</div></div>
@@ -503,6 +508,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
   <div class="err-box" id="uj_err"></div>
   <div class="result-card" id="uj_res">
     <div class="lot-hero"><div class="lot-number" id="uj_lots">0.00</div><div class="lot-unit">Standard Lots</div></div>
+    <div class="warn-box" id="uj_warn"></div>
     <div class="res-grid">
       <div class="res-cell"><div class="res-label">Lot Size</div><div class="res-val b" id="uj_rlot">-</div></div><div class="res-cell"><div class="res-label">Pip Value/Lot</div><div class="res-val w" id="uj_rpv">-</div></div>
       <div class="res-cell"><div class="res-label">SL Distance</div><div class="res-val r" id="uj_rsl">-</div></div><div class="res-cell"><div class="res-label">TP Distance</div><div class="res-val g" id="uj_rtp">-</div></div>
@@ -522,15 +528,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 <div class="page" id="page_xau">
   <div class="sec-label">Account & Risk</div>
   <div class="field"><label>Account Balance (USD)</label><input type="number" id="xau_bal" value="5000" inputmode="decimal" step="100" oninput="syncRisk('xau')"></div>
-  <div class="row2"><div class="field"><label>Risk %</label><input type="number" id="xau_rpct" value="0.5" inputmode="decimal" step="0.1" oninput="syncRisk('xau')"></div><div class="field"><label>Risk $ (USD)</label><input type="number" id="xau_rusd" value="25" inputmode="decimal" step="1" oninput="syncRiskMoney('xau')"></div></div>
-  <div class="risk-sync"><div class="risk-sync-row"><span class="risk-key">Risk Amount</span><span class="risk-val pos" id="xau_sync_usd">$25.00</span></div><div class="risk-sync-row"><span class="risk-key">Risk Percent</span><span class="risk-val" id="xau_sync_pct">0.50% of balance</span></div></div>
+  <div class="row2"><div class="field"><label>Risk %</label><input type="number" id="xau_rpct" value="1" inputmode="decimal" step="0.1" oninput="syncRisk('xau')"></div><div class="field"><label>Risk $ (USD)</label><input type="number" id="xau_rusd" value="50" inputmode="decimal" step="1" oninput="syncRiskMoney('xau')"></div></div>
+  <div class="risk-sync"><div class="risk-sync-row"><span class="risk-key">Risk Amount</span><span class="risk-val pos" id="xau_sync_usd">$50.00</span></div><div class="risk-sync-row"><span class="risk-key">Risk Percent</span><span class="risk-val" id="xau_sync_pct">1.00% of balance</span></div></div>
   <div class="sec-label">Trade Setup</div>
   <div class="row3">
-    <div class="field"><label>SL Pips</label><input type="number" id="xau_sl" value="830" inputmode="decimal" step="1" min="1"><div class="hint">pip=$0.10 | $10/pip/lot</div></div>
+    <div class="field"><label>SL Pips</label><input type="number" id="xau_sl" value="8.0" inputmode="decimal" step="any" min="0.001"><div class="hint">1 pip = $1 | $100/pip/lot</div></div>
     <div class="field"><label>RR Ratio</label><input type="number" id="xau_rr" value="2" inputmode="decimal" step="0.5" min="0.5"></div>
     <div class="field"><label>Leverage</label><select id="xau_lev"><option value="500">1:500</option><option value="200">1:200</option><option value="100" selected>1:100</option><option value="50">1:50</option><option value="20">1:20</option></select></div>
   </div>
-  <div class="meter"><div class="meter-top"><span>Risk Level</span><span class="meter-pct" id="xau_mpct">0.50%</span></div><div class="meter-bg"><div class="meter-fill" id="xau_mbar" style="width:5%"></div></div></div>
+  <div class="meter"><div class="meter-top"><span>Risk Level</span><span class="meter-pct" id="xau_mpct">1.00%</span></div><div class="meter-bg"><div class="meter-fill" id="xau_mbar" style="width:10%"></div></div></div>
   <div class="sec-label">Overnight Swap</div>
   <div class="toggle-row"><div class="toggle-label">Holding Overnight?<small>Toggle ON if trade passes midnight</small></div><label class="switch"><input type="checkbox" id="xau_overnight" onchange="toggleSwap('xau')"><span class="slider"></span></label></div>
   <div class="swap-section" id="xau_swap">
@@ -541,6 +547,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
   <div class="err-box" id="xau_err"></div>
   <div class="result-card" id="xau_res">
     <div class="lot-hero" style="background:linear-gradient(135deg,#150d00 0%,#17181e 100%)"><div class="lot-number gold-num" id="xau_lots">0.00</div><div class="lot-unit">Gold Lots (100 oz each)</div></div>
+    <div class="warn-box" id="xau_warn"></div>
     <div class="res-grid">
       <div class="res-cell"><div class="res-label">Lot Size</div><div class="res-val a" id="xau_rlot">-</div></div><div class="res-cell"><div class="res-label">Pip Value/Lot</div><div class="res-val w" id="xau_rpv">-</div></div>
       <div class="res-cell"><div class="res-label">SL Distance</div><div class="res-val r" id="xau_rsl">-</div></div><div class="res-cell"><div class="res-label">TP Distance</div><div class="res-val g" id="xau_rtp">-</div></div>
@@ -592,7 +599,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 
 <div class="footer">
   <strong>Design by Roshan Pokhrel</strong><br>
-  Position Sizing Calculator v3.3 &bull; EUR/USD &bull; USD/JPY &bull; XAU/USD &bull; NEPSE<br>
+  Position Sizing Calculator v3.4 &bull; EUR/USD &bull; USD/JPY &bull; XAU/USD &bull; NEPSE<br>
   <span style="font-size:10px;color:#374151">Educational use only. Not financial advice.</span>
 </div>
 
@@ -612,62 +619,80 @@ function rrHtml(r){const v=parseFloat(r);if(v<=0)return'<span class="rr-badge rr
 function showErr(p,m){const e=document.getElementById(p+'_err');e.textContent=m;e.classList.add('show');document.getElementById(p+'_res').classList.remove('show');}
 function hideErr(p){document.getElementById(p+'_err').classList.remove('show');}
 
-async function calcFX(p,sym){hideErr(p);const overnight=document.getElementById(p+'_overnight')?.checked??false;const dir=gv(p+'_dir')||'long',days=parseInt(gv(p+'_days'))||1;const data={symbol:sym,balance:gv(p+'_bal'),risk_pct:gv(p+'_rpct'),sl_pips:gv(p+'_sl'),rr:gv(p+'_rr'),leverage:gv(p+'_lev'),direction:dir,swap_days:overnight?days:0,usdjpy_rate:p==='uj'?gv('uj_rate'):150,swap_long:overnight?gv(p+'_swl'):0,swap_short:overnight?gv(p+'_sws'):0};try{const r=await fetch('/calc_forex',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const d=await r.json();if(d.error){showErr(p,d.error);return;}document.getElementById(p+'_lots').textContent=fmtN(d.lot_size);sd(p+'_rlot',d.lot_size+' lots');sd(p+'_rpv','$'+fmt2(d.pip_value)+'/pip');sd(p+'_rsl',d.sl_pips+' pips');sd(p+'_rtp',d.tp_pips+' pips');sd(p+'_rrisk','-$'+fmt2(d.risk_amount));sd(p+'_rrew','+$'+fmt2(d.reward_amount));document.getElementById(p+'_rrr').innerHTML=rrHtml(d.rr_ratio);sd(p+'_rrpct',d.risk_pct+'%');sd(p+'_rmarg','$'+fmt2(d.margin_required));const swBox=document.getElementById(p+'_swres');if(overnight&&d.swap_days>0){swBox.style.display='block';const s1p=document.getElementById(p+'_sw1p'),s1u=document.getElementById(p+'_sw1u'),s2p=document.getElementById(p+'_sw2p'),s2u=document.getElementById(p+'_sw2u');s1p.textContent=d.swap_per_night_pips;s1p.className='sp '+scls(d.swap_per_night_pips);s1u.textContent='$'+fmt2(d.swap_per_night_usd);s1u.className='su '+scls(d.swap_per_night_usd);s2p.textContent=d.swap_total_pips;s2p.className='sp '+scls(d.swap_total_pips);s2u.textContent='$'+fmt2(d.swap_total_usd);s2u.className='su '+scls(d.swap_total_usd);sd(p+'_swlbl','Total ('+days+' day'+(days>1?'s':'')+')');}else{swBox.style.display='none';}document.getElementById(p+'_res').classList.add('show');document.getElementById(p+'_res').scrollIntoView({behavior:'smooth',block:'nearest'});}catch(e){showErr(p,'Error: '+e.message);}}
+async function calcFX(p,sym){
+  hideErr(p);
+  const overnight=document.getElementById(p+'_overnight')?.checked??false;
+  const dir=gv(p+'_dir')||'long',days=parseInt(gv(p+'_days'))||1;
+  const data={symbol:sym,balance:gv(p+'_bal'),risk_pct:gv(p+'_rpct'),sl_pips:gv(p+'_sl'),rr:gv(p+'_rr'),leverage:gv(p+'_lev'),direction:dir,
+    swap_days:overnight?days:0,usdjpy_rate:p==='uj'?gv('uj_rate'):150,
+    swap_long:overnight?gv(p+'_swl'):'',swap_short:overnight?gv(p+'_sws'):''};
+  try{
+    const r=await fetch('/calc_forex',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const d=await r.json();
+    if(d.error){showErr(p,d.error);return;}
+    document.getElementById(p+'_lots').textContent=fmtN(d.lot_size);
+    sd(p+'_rlot',d.lot_size+' lots');
+    sd(p+'_rpv','$'+fmt2(d.pip_value)+'/pip');
+    sd(p+'_rsl',d.sl_pips+' pips');
+    sd(p+'_rtp',d.tp_pips+' pips');
+    sd(p+'_rrisk','-$'+fmt2(d.risk_amount));
+    sd(p+'_rrew','+$'+fmt2(d.reward_amount));
+    document.getElementById(p+'_rrr').innerHTML=rrHtml(d.rr_ratio);
+    sd(p+'_rrpct',d.risk_pct+'%');
+    sd(p+'_rmarg',d.margin_required===null?'N/A':'$'+fmt2(d.margin_required));
+    const wb=document.getElementById(p+'_warn');
+    if(wb){if(d.min_lot_forced){wb.textContent='⚠ Minimum lot (0.01) exceeds your risk. Actual risk is higher than planned.';wb.classList.add('show');}else{wb.classList.remove('show');}}
+    const swBox=document.getElementById(p+'_swres');
+    if(overnight&&d.swap_days>0){
+      swBox.style.display='block';
+      const s1p=document.getElementById(p+'_sw1p'),s1u=document.getElementById(p+'_sw1u'),s2p=document.getElementById(p+'_sw2p'),s2u=document.getElementById(p+'_sw2u');
+      s1p.textContent=d.swap_per_night_pips;s1p.className='sp '+scls(d.swap_per_night_pips);
+      s1u.textContent='$'+fmt2(d.swap_per_night_usd);s1u.className='su '+scls(d.swap_per_night_usd);
+      s2p.textContent=d.swap_total_pips;s2p.className='sp '+scls(d.swap_total_pips);
+      s2u.textContent='$'+fmt2(d.swap_total_usd);s2u.className='su '+scls(d.swap_total_usd);
+      sd(p+'_swlbl','Total ('+days+' day'+(days>1?'s':'')+')');
+    }else{swBox.style.display='none';}
+    document.getElementById(p+'_res').classList.add('show');
+    document.getElementById(p+'_res').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }catch(e){showErr(p,'Error: '+e.message);}
+}
 
 async function calcNP(){hideErr('np');const data={balance:gv('np_bal'),risk_pct:gv('np_rpct'),sl_pips:gv('np_sl'),rr:gv('np_rr'),entry_price:gv('np_entry'),brokerage:gv('np_brok')};try{const r=await fetch('/calc_nepse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const d=await r.json();if(d.error){showErr('np',d.error);return;}document.getElementById('np_shares').textContent=fmtN(d.shares,0);sd('np_rsl','NPR '+fmt2(d.sl_points));sd('np_rtp','NPR '+fmt2(d.tp_points));sd('np_rrisk','-NPR '+fmt2(d.risk_amount));sd('np_rrew','+NPR '+fmt2(d.reward_amount));document.getElementById('np_rrr').innerHTML=rrHtml(d.rr_ratio);sd('np_rrpct',d.risk_pct+'%');sd('np_rinv','NPR '+fmt2(d.investment));sd('np_fbrok','NPR '+fmt2(d.brokerage_buy));sd('np_fsebon','NPR '+fmt2(d.sebon_fee));sd('np_ftotal','NPR '+fmt2(d.total_fees));document.getElementById('np_res').classList.add('show');document.getElementById('np_res').scrollIntoView({behavior:'smooth',block:'nearest'});}catch(e){showErr('np','Error: '+e.message);}}
 
 async function loadRate(){try{const r=await fetch('/usdjpy');const d=await r.json();if(d.rate){sv('uj_rate',parseFloat(d.rate).toFixed(3));const h=document.getElementById('uj_rate_hint');if(h){h.textContent='Live rate loaded';h.className='hint live';}}}catch(e){console.warn('Rate fetch failed');}}
 
 function newsCardHtml(d){
-    // Handle error state with manual link
-    if(d.error){
-        return '<div style="color:var(--red);font-size:13px;line-height:1.6;">'+
-            '⚠️ '+d.error+'<br><br>'+
-            '<a href="'+(d.manual_link||'https://www.forexfactory.com/calendar')+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;">'+
-            '🔗 Open ForexFactory Calendar →'+
-            '</a>'+
-            '</div>';
-    }
-    // Handle "no news" state
-    if(!d.currency && d.message){
-        return '<div style="color:var(--muted);font-size:13px;">'+
-            '✅ '+d.message+
-            (d.stale?'<br><div class="news-stale">⚠ Cache may be stale</div>':'')+
-            '</div>';
-    }
-    let warn='';
-    let stale='';
-    if(d.lock)warn='<div class="news-warn">⚠ News in &lt;30 min — reduce risk to 0.5%</div>';
-    if(d.stale)stale='<div class="news-stale">⚠ Data may be stale (cache &gt;48h old)</div>';
-    return '<div class="news-currency">🔴 '+d.currency+'</div>'+
-        '<div class="news-title">'+d.title+'</div>'+
-        '<div class="news-row">📅 '+d.date+'</div>'+
-        '<div class="news-row">🕒 '+d.time+'</div>'+
-        '<div class="news-tz">'+d.timezone+'</div>'+
-        '<div class="news-countdown">⏳ Starts in '+d.countdown+'</div>'+
-        '<div class="news-stat">Forecast: '+d.forecast+'</div>'+
-        '<div class="news-stat">Previous: '+d.previous+'</div>'+
-        warn+stale;
+  if(d.error){
+    return '<div style="color:var(--red);font-size:13px;line-height:1.6;">⚠️ '+d.error+'<br><br><a href="'+(d.manual_link||'https://www.forexfactory.com/calendar')+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;">🔗 Open ForexFactory Calendar →</a></div>';
+  }
+  if(!d.currency && d.message){
+    return '<div style="color:var(--muted);font-size:13px;">✅ '+d.message+(d.stale?'<br><div class="news-stale">⚠ Cache may be stale</div>':'')+'</div>';
+  }
+  let warn='',stale='';
+  if(d.lock)warn='<div class="news-warn">⚠ News in &lt;30 min — reduce risk to 0.5%</div>';
+  if(d.stale)stale='<div class="news-stale">⚠ Data may be stale (cache &gt;48h old)</div>';
+  return '<div class="news-currency">🔴 '+d.currency+'</div>'+
+    '<div class="news-title">'+d.title+'</div>'+
+    '<div class="news-row">📅 '+d.date+'</div>'+
+    '<div class="news-row">🕒 '+d.time+'</div>'+
+    '<div class="news-tz">'+d.timezone+'</div>'+
+    '<div class="news-countdown">⏳ Starts in '+d.countdown+'</div>'+
+    '<div class="news-stat">Forecast: '+d.forecast+'</div>'+
+    '<div class="news-stat">Previous: '+d.previous+'</div>'+warn+stale;
 }
 
 async function loadNews(){
-    try{
-        const r=await fetch('/news');
-        const d=await r.json();
-        if(d.error){
-            document.getElementById('newsBox').innerHTML=newsCardHtml(d);
-            return;
-        }
-        document.getElementById('newsBox').innerHTML=d.currency||d.message?newsCardHtml(d):'No upcoming high-impact news.';
-    }catch(e){
-        document.getElementById('newsBox').innerHTML='<div style="color:var(--red);font-size:13px;">News fetch failed: '+e.message+'<br><a href="https://www.forexfactory.com/calendar" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;">🔗 Check ForexFactory manually</a></div>';
-    }
+  try{
+    const r=await fetch('/news');
+    const d=await r.json();
+    document.getElementById('newsBox').innerHTML=(d.error||d.currency||d.message)?newsCardHtml(d):'No upcoming high-impact news.';
+  }catch(e){
+    document.getElementById('newsBox').innerHTML='<div style="color:var(--red);font-size:13px;">News fetch failed: '+e.message+'<br><a href="https://www.forexfactory.com/calendar" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;">🔗 Check ForexFactory manually</a></div>';
+  }
 }
 
 async function loadSessions(){try{const r=await fetch('/sessions');const d=await r.json();const list=document.getElementById('sessionList');list.innerHTML=d.sessions.map(s=>`<div class="session-item ${s.open?'open':'closed'}">${s.label}</div>`).join('');const ob=document.getElementById('overlapBox');ob.innerHTML=d.overlap?`<div class="session-overlap">⚡ High Volatility · ${d.overlap}</div>`:'';}catch(e){}}
 
-['eu','uj','xau'].forEach(p=>{document.getElementById(p+'_bal').addEventListener('input',()=>syncRisk(p));});
-document.getElementById('np_bal').addEventListener('input',()=>syncRisk('np'));
 syncRisk('eu');syncRisk('uj');syncRisk('xau');syncRisk('np');
 loadRate();loadNews();loadSessions();
 setInterval(loadRate,60000);setInterval(loadNews,3600000);setInterval(loadSessions,60000);
@@ -681,21 +706,29 @@ setInterval(loadRate,60000);setInterval(loadNews,3600000);setInterval(loadSessio
 def index():
     return render_template_string(HTML)
 
+
 @app.route("/calc_forex", methods=["POST"])
 def api_forex():
-    data = request.get_json()
-    sym = data.get("symbol", "EURUSD").upper()
-    inst = dict(INSTRUMENTS.get(sym, INSTRUMENTS["EURUSD"]))
-    if data.get("swap_long"):
-        inst["swap_long"] = float(data["swap_long"])
-    if data.get("swap_short"):
-        inst["swap_short"] = float(data["swap_short"])
-    INSTRUMENTS[sym].update(inst)
-    return jsonify(calc_forex(data))
+    data = request.get_json(silent=True) or {}
+    sym = str(data.get("symbol", "EURUSD")).upper()
+    if sym not in INSTRUMENTS:
+        return jsonify({"error": "Unknown symbol"})
+    data["symbol"] = sym
+    inst = dict(INSTRUMENTS[sym])            # work on a COPY — never mutate global config
+    for key in ("swap_long", "swap_short"):
+        v = data.get(key)
+        if v not in (None, ""):
+            try:
+                inst[key] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return jsonify(calc_forex(data, inst))
+
 
 @app.route("/calc_nepse", methods=["POST"])
 def api_nepse():
-    return jsonify(calc_nepse(request.get_json()))
+    return jsonify(calc_nepse(request.get_json(silent=True) or {}))
+
 
 @app.route("/usdjpy")
 def usdjpy():
@@ -711,9 +744,11 @@ def usdjpy():
     except Exception:
         return jsonify({"rate": _rate_cache["value"] or 160.0})
 
+
 @app.route("/news")
 def news():
     return jsonify(get_next_high_news())
+
 
 @app.route("/sessions")
 def sessions():
@@ -722,13 +757,9 @@ def sessions():
 
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     print("=" * 52)
-    print("  Position Sizing Calculator v3.3")
+    print("  Position Sizing Calculator v3.4")
     print("  Design by Roshan Pokhrel")
-    print("  Forex + NEPSE + News + Sessions")
     print("=" * 52)
-    print("  Desktop: http://localhost:5000")
-    print("  Mobile:  http://<your-ip>:5000")
-    print("  Stop:    Ctrl+C")
-    print("=" * 52)
-    app.run(debug=True, port=5000, host="0.0.0.0")
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", port=port, host="0.0.0.0")
